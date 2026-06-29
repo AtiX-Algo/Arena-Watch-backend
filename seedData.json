@@ -1,0 +1,23 @@
+[
+  {
+    "id": "toffee_fifa_pro",
+    "name": "Toffee FIFA 2026 Pro",
+    "category": "Sports",
+    "type": "hls",
+    "logo": "https://i.ibb.co.com/vnbkF0r/fifa-world-cup-2026-logo-png-seeklogo-665644.png",
+    "servers": [
+      { "serverId": "tf_1", "name": "Main Stream", "url": "http://160.25.249.226:8099/LIVE/tracks-v1/index.fmp4.m3u8?token=d049a1e35b6c5083fab4c14a4b3a410290ddefed-283a25474db74f6b422205f4d65cbc5b-1782511836-1782501036", "quality": "1080p" },
+      { "serverId": "tf_2", "name": "Secondary Live", "url": "http://160.25.249.226:8099/2LIVE/tracks-v1/index.fmp4.m3u8?token=cf20b5b881102e5008bd173f9a5d2b3ae02a4684-5c99731b1ea13cb68e83f2f09d1bda0a-1782511994-1782501194", "quality": "1080p" }
+    ]
+  },
+  {
+    "id": "bsports_mux",
+    "name": "BSports Mux",
+    "category": "Sports",
+    "type": "hls",
+    "logo": "https://imglink.cc/cdn/o5BoWU_BEz.png",
+    "servers": [
+      { "serverId": "bs_1", "name": "High Quality", "url": "https://storage.googleapis.com/bluejaysx/bsports/mux_audio/index-1.m3u8", "quality": "HD" }
+    ]
+  }
+]
