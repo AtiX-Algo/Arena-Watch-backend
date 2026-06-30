@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const Channel = require('../models/Channel');
-const { executeSecureCapture, discoverKickBDMatches } = require('../services/scraperEngine');
+const { executeSecureCapture, discoverKickBDMatches, scrapeBDIPTVChannel } = require('../services/scraperEngine');
 
 // GET all channels sorted by name
 router.get('/', async (req, res) => {
@@ -218,39 +218,55 @@ router.post('/refresh-premium', async (req, res) => {
   try {
     console.log('[Scheduler] Fetching strictly LIVE matches from KickBD...');
     const liveMatches = await discoverKickBDMatches('https://kickbd.org');
+    const results = [];
 
-    if (liveMatches.length === 0) {
-      return res.status(404).json({ success: false, message: "No active live matches found right now." });
-    }
-
+    // Only map the Premium Pro channels to KickBD matches
     const targetMap = {
       'premium_pro_1': liveMatches[0],
       'premium_pro_2': liveMatches[1] || liveMatches[0], 
-      'premium_pro_3': liveMatches[2] || liveMatches[0]  
+      'premium_pro_3': liveMatches[2] || liveMatches[0]
     };
 
-    const premiumChannels = await Channel.find({ id: { $in: ['premium_pro_1', 'premium_pro_2', 'premium_pro_3'] } });
-    const results = [];
+    const premiumChannels = await Channel.find({ 
+      id: { $in: [
+        'premium_pro_1', 
+        'premium_pro_2', 
+        'premium_pro_3',
+        'premium_bdiptv_1',
+        'premium_bdiptv_2'
+      ]} 
+    });
 
     for (const channel of premiumChannels) {
-      const targetUrl = targetMap[channel.id];
-      if (!targetUrl) continue;
-
       try {
-        // Execute capture returns an ARRAY of servers now
-        const serversData = await executeSecureCapture(targetUrl); 
+        let serversData = [];
+
+        // BRANCH LOGIC: Check if it's a BDIPTV channel or a KickBD channel
+        if (channel.id.includes('bdiptv')) {
+          console.log(`[Scheduler] Routing ${channel.id} to BDIPTV Scraper...`);
+          // Determine which button to click based on the channel ID
+          const buttonText = channel.id === 'premium_bdiptv_1' ? 'LIVE 1' : 'LIVE 2';
+          serversData = await scrapeBDIPTVChannel(buttonText); 
+        } else {
+          console.log(`[Scheduler] Routing ${channel.id} to KickBD Scraper...`);
+          const targetUrl = targetMap[channel.id];
+          if (!targetUrl) {
+            results.push({ channelId: channel.id, success: false, reason: "No KickBD match available" });
+            continue;
+          }
+          serversData = await executeSecureCapture(targetUrl); 
+        }
         
+        // Save the scraped servers to MongoDB (works for both scrapers!)
         if (serversData && serversData.length > 0) {
-          // Format the array to match your database schema
           const newServersArray = serversData.map((srv, index) => ({
             serverId: `auto_srv_${index + 1}`,
-            name: srv.name, // e.g., "Detected Server 1"
+            name: srv.name, 
             url: srv.url,
             quality: "Dynamic",
             isActive: true
           }));
 
-          // Replace the ENTIRE servers array for this channel
           await Channel.findOneAndUpdate(
             { id: channel.id },
             { $set: { servers: newServersArray } },

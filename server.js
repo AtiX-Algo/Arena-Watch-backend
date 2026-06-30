@@ -6,6 +6,19 @@ const cors = require('cors');
 require('dotenv').config();
 require('./scheduler/refreshTokens');
 
+// ==========================================
+// 🛡️ GLOBAL CRASH PREVENTION
+// Prevents Puppeteer/Stealth plugin errors from killing the Node process
+// ==========================================
+process.on('uncaughtException', (err) => {
+  console.error('🚨 [Fatal] Uncaught Exception:', err.message);
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('🚨 [Fatal] Unhandled Rejection at:', promise, 'reason:', reason);
+});
+// ==========================================
+
 // IMPORT YOUR NEW POLLER
 const { startPolling, getCachedMatches } = require('./services/espnPoller');
 

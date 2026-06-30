@@ -17,7 +17,7 @@ const SITE_CONFIGS = {
     clickDelay: 2000,
     waitAfterClick: 8000,
   },
-  'kickbd': { 
+  'kickbd': { // Matches kickbd.org, kickbd.co, kickbd.com flexibly
     profile: INTERACTION_PROFILES.OVERLAY_DISMISS,
     selector: 'video, .play-button, .vjs-big-play-button, #player',
     adBlockTerms: ['googleads', 'analytics', 'popunder', 'onclickads', 'tracking'],
@@ -32,14 +32,6 @@ const SITE_CONFIGS = {
     targetExtensions: ['.m3u8', '.mpd'],
     clickDelay: 3000,
     waitAfterClick: 8000,
-  },
-  'bdiptv.net': { // <-- NEW CONFIG FOR BDIPTV
-    profile: INTERACTION_PROFILES.OVERLAY_DISMISS,
-    selector: 'video, #player, iframe',
-    adBlockTerms: ['googleads', 'popunder', 'tracking', 'analytics'],
-    targetExtensions: ['.m3u8', '.mpd'],
-    clickDelay: 2000,
-    waitAfterClick: 6000,
   }
 };
 
@@ -64,17 +56,23 @@ function getSiteConfig(url) {
 
 function createInterceptor(adBlockTerms, targetExtensions, onCapture) {
   return (req) => {
+    if (req.isInterceptResolutionHandled && req.isInterceptResolutionHandled()) return;
     try {
       const url = req.url().toLowerCase();
-      if (adBlockTerms.some(term => url.includes(term))) return req.abort();
+      if (adBlockTerms.some(term => url.includes(term))) {
+        return req.abort().catch(() => {});
+      }
       
       const isTarget = targetExtensions.some(ext => url.includes(ext));
       if (isTarget && !url.includes('/ad') && !url.includes('blank') && !url.includes('pre-roll')) {
         onCapture(req.url());
       }
-      return req.continue();
+      
+      if (!req.isInterceptResolutionHandled || !req.isInterceptResolutionHandled()) {
+        req.continue().catch(() => {});
+      }
     } catch (error) {
-      try { req.continue(); } catch (_) {}
+      try { if (!req.isInterceptResolutionHandled()) req.continue().catch(() => {}); } catch (_) {}
     }
   };
 }
@@ -97,6 +95,7 @@ async function getBrowser() {
 
     browserInstance.on('targetcreated', async (target) => {
       if (target.type() === 'page') {
+        // The 500ms delay that makes this entire script work perfectly
         setTimeout(async () => {
           try {
             const newPage = await target.page();
@@ -130,7 +129,7 @@ async function aggressiveClickLoop(page, maxClicks = 3, delay = 2000) {
 }
 
 // -------------------------------------------------------------
-// ARMORED MULTI-SERVER CAPTURE (ISOLATED CLICK WINDOWS)
+// MULTI-SERVER CAPTURE
 // -------------------------------------------------------------
 async function executeSecureCapture(targetUrl, retries = 2) {
   const config = getSiteConfig(targetUrl);
@@ -140,30 +139,22 @@ async function executeSecureCapture(targetUrl, retries = 2) {
     const browser = await getBrowser();
     const page = await browser.newPage();
     
-    let finalizedServers = [];
-    let windowCapturedUrls = [];
+    let uniqueServerMap = new Map(); 
 
     try {
       await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
       await page.setViewport({ width: 1280, height: 720 });
       await page.setRequestInterception(true);
       
-      page.on('request', (req) => {
-        try {
-          const url = req.url().toLowerCase();
-          if (config.adBlockTerms.some(term => url.includes(term))) return req.abort();
-          
-          const isTarget = config.targetExtensions.some(ext => url.includes(ext));
-          if (isTarget && !url.includes('/ad') && !url.includes('blank') && !url.includes('pre-roll')) {
-            windowCapturedUrls.push(req.url());
-          }
-          return req.continue();
-        } catch (_) {
-          try { req.continue(); } catch (__) {}
+      let currentLabel = "Primary Stream";
+      
+      page.on('request', createInterceptor(config.adBlockTerms, config.targetExtensions, (detectedUrl) => {
+        if (!uniqueServerMap.has(detectedUrl)) {
+          uniqueServerMap.set(detectedUrl, currentLabel);
         }
-      });
+      }));
 
-      console.log(`[Scraper] Launching isolated capture matrix for: ${targetUrl} (Attempt ${attempt}/${retries})`);
+      console.log(`[Scraper] Initializing capture for: ${targetUrl} (Attempt ${attempt}/${retries})`);
       await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 35000 });
       await new Promise(r => setTimeout(r, 4000));
 
@@ -171,19 +162,16 @@ async function executeSecureCapture(targetUrl, retries = 2) {
         const structuralElements = Array.from(document.querySelectorAll('button, a, span, div, li'));
         const matches = structuralElements.filter(el => {
           const txt = (el.innerText || '').trim();
-          // ADDED "LIVE" TO THE REGEX SO IT CATCHES "LIVE 1" AND "LIVE 2" BUTTONS
-          return /Server|Stream|Link|Player|HD|SD|Toffee|Fox|Caze|Extreme|Sports|LIVE/i.test(txt) && txt.length > 0 && txt.length < 25;
+          return /Server|Stream|Link|Player|HD|SD|Toffee|Fox|Caze|Extreme|Sports/i.test(txt) && txt.length > 0 && txt.length < 25;
         });
         return [...new Set(matches.map(el => (el.innerText || '').trim()))];
       });
 
       if (serverButtonTexts.length > 0) {
-        console.log(`[Scraper] Identified ${serverButtonTexts.length} interactive network nodes. Commencing window isolation loop...`);
+        console.log(`[Scraper] Detected ${serverButtonTexts.length} potential routing links. Interrogating...`);
         
-        for (const label of serverButtonTexts.slice(0, 8)) { 
-          console.log(`[Scraper] Triggering node channel window: [${label}]`);
-          
-          windowCapturedUrls = [];
+        for (const label of serverButtonTexts.slice(0, 6)) { 
+          currentLabel = label;
           
           const clickedSuccessfully = await page.evaluate((targetText) => {
             const items = Array.from(document.querySelectorAll('button, a, span, div, li'));
@@ -199,57 +187,35 @@ async function executeSecureCapture(targetUrl, retries = 2) {
           if (clickedSuccessfully) {
             await new Promise(r => setTimeout(r, 2000));
             await aggressiveClickLoop(page, 1, 1000); 
-            await new Promise(r => setTimeout(r, 4000)); 
-
-            if (windowCapturedUrls.length > 0) {
-              const targetManifestUrl = [...new Set(windowCapturedUrls)][0];
-              const isDuplicateUrl = finalizedServers.some(srv => srv.url === targetManifestUrl);
-              
-              if (!isDuplicateUrl) {
-                finalizedServers.push({
-                  name: `${label} (Live HD)`,
-                  url: targetManifestUrl
-                });
-                console.log(`  -> Locked server [${label}] to manifest vector.`);
-              }
-            } else {
-              const activeIframeSrc = await page.evaluate(() => {
-                const primaryIframe = document.querySelector('iframe');
-                return primaryIframe ? primaryIframe.src : null;
-              });
-              
-              if (activeIframeSrc && activeIframeSrc !== 'about:blank' && !finalizedServers.some(srv => srv.url === activeIframeSrc)) {
-                finalizedServers.push({
-                  name: `${label} (Embedded Relay)`,
-                  url: activeIframeSrc
-                });
-                console.log(`  -> Locked server [${label}] via secondary iframe framework.`);
-              }
-            }
+            await new Promise(r => setTimeout(r, 3000)); 
           }
         }
-      } 
-      
-      if (finalizedServers.length === 0) {
-        console.log(`[Scraper] Button windows blank. Attempting legacy standalone extraction...`);
-        const standardIframeSrc = await page.evaluate(() => {
+      } else {
+        console.log(`[Scraper] Flat elements. Checking embedded iframe nodes...`);
+        const iframeSrc = await page.evaluate(() => {
           const iframes = Array.from(document.querySelectorAll('iframe'));
           return iframes.length > 0 ? iframes[0].src : null;
         });
 
-        if (standardIframeSrc && standardIframeSrc !== 'about:blank') {
-          finalizedServers.push({
-            name: "Default Direct Relay Node",
-            url: standardIframeSrc
-          });
+        if (iframeSrc && iframeSrc !== 'about:blank') {
+          currentLabel = "Iframe Embed Gateway";
+          await page.goto(iframeSrc, { waitUntil: 'networkidle2', timeout: 20000 });
+          await new Promise(r => setTimeout(r, 3000)); 
+          await aggressiveClickLoop(page, 3, config.clickDelay);
+          await new Promise(r => setTimeout(r, config.waitAfterClick));
         }
       }
 
-      if (finalizedServers.length > 0) {
-        console.log(`[Scraper] SUCCESS! Successfully registered ${finalizedServers.length} distinct live tracks.`);
-        return finalizedServers;
+      if (uniqueServerMap.size > 0) {
+        const serverObjects = Array.from(uniqueServerMap.entries()).map(([url, label], index) => ({
+          name: `${label} (Node ${index + 1})`,
+          url: url
+        }));
+        
+        console.log(`[Scraper] SUCCESS! Captured ${serverObjects.length} unique servers.`);
+        return serverObjects;
       } else {
-        throw new Error('No functional manifest vectors isolated across streaming channel run operations.');
+        throw new Error('No valid manifest streaming link captured.');
       }
 
     } catch (error) {
@@ -260,87 +226,158 @@ async function executeSecureCapture(targetUrl, retries = 2) {
       await page.close().catch(() => {});
     }
   }
-  throw lastError || new Error('Scraping engine loops fully exhausted.');
+  throw lastError || new Error('Scraping completely failed.');
 }
 
 // -------------------------------------------------------------
-// ARMORED LIVE FILTER DISCOVERY WITH AUTOMATIC AD BYPASS
+// LIVE FILTER DISCOVERY
 // -------------------------------------------------------------
 async function discoverKickBDMatches(baseUrl = 'https://kickbd.org') {
+  console.log(`[Discovery] Scanning ${baseUrl} for active LIVE links...`);
   const browser = await getBrowser();
   const page = await browser.newPage();
   
-  const targetUrls = [
-    baseUrl,
-    `${baseUrl.replace(/\/$/, '')}/matches/`,
-    `${baseUrl.replace(/\/$/, '')}/matches/fifa-world-cup-2026-round-of-32/`
-  ];
-
-  let matchLinks = [];
-
   try {
     await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
-    await page.setViewport({ width: 1280, height: 720 });
     await page.setRequestInterception(true);
-    
     page.on('request', (req) => {
-      if (['image', 'stylesheet', 'font'].includes(req.resourceType())) req.abort();
-      else req.continue();
+      if (req.isInterceptResolutionHandled && req.isInterceptResolutionHandled()) return;
+      if (['image', 'stylesheet', 'font'].includes(req.resourceType())) {
+        req.abort().catch(() => {});
+      } else {
+        req.continue().catch(() => {});
+      }
     });
 
-    for (const url of targetUrls) {
-      try {
-        console.log(`[Discovery] Scanning target vector: ${url}`);
+    await page.goto(baseUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
+
+    const matchLinks = await page.evaluate(() => {
+      const links = Array.from(document.querySelectorAll('a[href*="/matches/"]'));
+      const activeUrls = [];
+
+      links.forEach(link => {
+        const text = link.innerText ? link.innerText.toUpperCase() : '';
+        const href = link.href.toLowerCase();
         
-        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 25000 });
-        await new Promise(r => setTimeout(r, 3000)); 
+        const isMatchTarget = href.includes('world-cup') || href.includes('fifa') || href.includes('round-of');
+        const isLive = text.includes('LIVE') || text.includes('WATCH') || text.includes('MIN');
 
-        await page.mouse.click(640, 360).catch(() => {});
-        await new Promise(r => setTimeout(r, 1500));
-
-        const extracted = await page.evaluate(() => {
-          const anchors = Array.from(document.querySelectorAll('a[href*="/matches/"]'));
-          const baseOrigin = window.location.origin;
-          
-          return anchors
-            .map(a => {
-              let href = a.getAttribute('href') || '';
-              if (href.startsWith('/')) href = baseOrigin + href;
-              return { href: href.toLowerCase(), originalHref: a.href, text: (a.innerText || '').toUpperCase() };
-            })
-            .filter(item => {
-              const hasTargetKeywords = item.href.includes('world-cup') || item.href.includes('fifa') || item.href.includes('round-of');
-              const isLiveIndicator = item.text.includes('LIVE') || item.text.includes('WATCH') || item.text.includes('MIN') || item.text.includes('VS');
-              const isNotDirectoryRoot = !item.href.endsWith('/matches/') && !item.href.endsWith('/matches');
-              
-              return (hasTargetKeywords || isLiveIndicator) && isNotDirectoryRoot;
-            })
-            .map(item => item.originalHref);
-        });
-
-        if (extracted && extracted.length > 0) {
-          matchLinks = [...new Set(extracted)];
-          console.log(`[Discovery] Success! Harvested ${matchLinks.length} actionable paths from vector.`);
-          break; 
+        if (isMatchTarget || isLive) {
+          activeUrls.push(link.href);
         }
-      } catch (navError) {
-        console.warn(`[Discovery] Target lane ${url} bypassed: ${navError.message}`);
-      }
-    }
+      });
+      return [...new Set(activeUrls)].slice(0, 5);
+    });
 
-    console.log(`[Discovery] Run complete. Total verified links:`);
-    matchLinks.forEach((link, i) => console.log(`  -> Vector ${i + 1}: ${link}`));
+    console.log(`[Discovery] Successfully locked onto ${matchLinks.length} dynamic match paths:`);
+    matchLinks.forEach((link, i) => console.log(`  -> Active Track ${i+1}: ${link}`));
     return matchLinks;
-
   } catch (error) {
-    console.error('[Discovery] System extraction error:', error.message);
+    console.error('[Discovery] Failed to extract links:', error.message);
     return [];
   } finally {
     await page.close().catch(() => {});
   }
 }
 
+// -------------------------------------------------------------
+// BDIPTV TARGETED CAPTURE
+// -------------------------------------------------------------
+// -------------------------------------------------------------
+// BDIPTV TARGETED CAPTURE (MAXIMUM SECURITY BYPASS)
+// -------------------------------------------------------------
+// -------------------------------------------------------------
+// BDIPTV TARGETED CAPTURE (MAXIMUM SECURITY BYPASS)
+// -------------------------------------------------------------
+async function scrapeBDIPTVChannel(channelText = 'LIVE 1', retries = 2) {
+  const vanillaPuppeteer = require('puppeteer'); 
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    const browser = await vanillaPuppeteer.launch({
+      headless: false, // 🔥 TEMPORARILY FALSE to visually see the block
+      ignoreHTTPSErrors: true,
+      args: [
+        '--no-sandbox', 
+        '--disable-setuid-sandbox',
+        '--disable-web-security',
+        '--allow-running-insecure-content',
+        '--disable-extensions',
+        // 🔥 MERGED DISABLE FEATURES (No duplicates!)
+        '--disable-features=BlockInsecurePrivateNetworkRequests,IsolateOrigins,site-per-process,HttpsUpgrades,OptimizationHints',
+        '--disable-client-side-phishing-detection',
+        '--safebrowsing-disable-download-protection',
+        '--safebrowsing-disable-auto-update',
+        '--ignore-certificate-errors',
+        // Force Google DNS to bypass ISP blocks
+        '--async-dns', 
+        '--force-fieldtrials=BuiltInDns/Enable/'
+      ]
+    });
+    
+    const page = await browser.newPage();
+    let capturedUrl = null;
+
+    try {
+      await page.setUserAgent('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36');
+      await page.setViewport({ width: 1280, height: 720 });
+
+      // PASSIVE SNIFFING
+      page.on('response', (response) => {
+        const url = response.url().toLowerCase();
+        if ((url.includes('.m3u8') || url.includes('.mpd')) && !url.includes('blank')) {
+          capturedUrl = response.url();
+        }
+      });
+
+      console.log(`[BDIPTV] Loading portal for channel: '${channelText}' (Attempt ${attempt}/${retries})`);
+      
+      await page.goto('http://tv.bdiptv.net/', { waitUntil: 'domcontentloaded', timeout: 45000 });
+      await new Promise(r => setTimeout(r, 4000));
+
+      const clicked = await page.evaluate((text) => {
+        const elements = Array.from(document.querySelectorAll('div, a, span, button, h3, p, li'));
+        const target = elements.find(el => (el.innerText || '').trim().toUpperCase() === text.toUpperCase());
+        
+        if (target) {
+          target.scrollIntoView({ block: 'center' });
+          target.click();
+          return true;
+        }
+        return false;
+      }, channelText);
+
+      if (clicked) {
+        console.log(`[BDIPTV] Clicked '${channelText}'. Waiting for player to fetch manifest...`);
+        for (let i = 0; i < 2; i++) {
+          await page.mouse.click(640, 360);
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        await new Promise(r => setTimeout(r, 8000)); 
+      } else {
+        throw new Error(`UI Element for '${channelText}' not found.`);
+      }
+
+      if (capturedUrl) {
+        console.log(`[BDIPTV] SUCCESS! Captured stream for ${channelText}.`);
+        await browser.close(); 
+        return [{ name: `BDIPTV ${channelText} (Auto)`, url: capturedUrl }]; 
+      } else {
+        throw new Error(`Clicked '${channelText}' but no .m3u8 link was captured.`);
+      }
+
+    } catch (error) {
+      lastError = error;
+      console.warn(`[BDIPTV] Attempt ${attempt} failed: ${error.message}`);
+      await browser.close().catch(() => {});
+      if (attempt < retries) await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+  throw lastError || new Error(`Completely failed to scrape BDIPTV channel: ${channelText}`);
+}
+
 module.exports = { 
   executeSecureCapture,
-  discoverKickBDMatches
+  discoverKickBDMatches,
+  scrapeBDIPTVChannel
 };
