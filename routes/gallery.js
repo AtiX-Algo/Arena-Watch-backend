@@ -35,7 +35,7 @@ router.post('/', async (req, res) => {
 
 router.put('/:id/feature', async (req, res) => {
   try {
-    // 🛑 CHANGE THIS: Gallery.findById -> GalleryCard.findById
+   
     const card = await GalleryCard.findById(req.params.id); 
     if (!card) return res.status(404).json({ message: 'Card not found' });
 

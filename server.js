@@ -3,6 +3,7 @@ const http = require('http');
 const mongoose = require('mongoose');
 const { Server } = require('socket.io');
 const cors = require('cors');
+const axios = require('axios'); // 🔥 Added for routing proxy requests
 require('dotenv').config();
 require('./scheduler/refreshTokens');
 
@@ -68,6 +69,87 @@ app.use('/api/auth', authRoutes);
 app.use('/api/fancards', fanCardRoutes);
 app.use('/api/dreamxi', dreamxiRoutes);
 app.use('/api/predictions', predictionRoutes);
+
+// ==========================================
+// 📺 LIVE STREAM SECURE PROXY MATRIX
+// Bypasses CORS and firewalls by masking headers 
+// and rewriting stream links recursively on-the-fly.
+// ==========================================
+
+// 1. HLS/DASH Playlists (.m3u8 / .mpd) Proxy
+app.get('/api/proxy/stream.m3u8', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).send('Missing url parameter');
+
+  try {
+    const response = await axios.get(url, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://toffeelive.com/',
+        'Origin': 'https://toffeelive.com'
+      }
+    });
+
+    const manifest = response.data;
+    const host = `${req.protocol}://${req.get('host')}`;
+
+    // Step through the file line by line to inject our proxy matrix route
+    const lines = manifest.split('\n');
+    const updatedLines = lines.map(line => {
+      const trimmed = line.trim();
+      if (!trimmed || trimmed.startsWith('#')) return line;
+
+      let absoluteUrl;
+      try {
+        // Resolve path structures seamlessly (handles domain-relative and absolute paths)
+        absoluteUrl = new URL(trimmed, url).href;
+      } catch (e) {
+        return line;
+      }
+
+      // Route sub-manifests recursively back here, or route data chunks via binary pipeline
+      if (absoluteUrl.includes('.m3u8') || absoluteUrl.includes('.mpd')) {
+        return `${host}/api/proxy/stream.m3u8?url=${encodeURIComponent(absoluteUrl)}`;
+      }
+      return `${host}/api/proxy/chunk?url=${encodeURIComponent(absoluteUrl)}`;
+    });
+
+    res.setHeader('Content-Type', 'application/x-mpegURL');
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.send(updatedLines.join('\n'));
+  } catch (err) {
+    console.error('🚨 Proxy Manifest Mapping Error:', err.message);
+    res.status(500).send('Stream manifest translation vectors corrupted.');
+  }
+});
+
+// 2. Binary Media Data Segments (.ts / chunks) Pipeline Proxy
+app.get('/api/proxy/chunk', async (req, res) => {
+  const { url } = req.query;
+  if (!url) return res.status(400).send('Missing url parameter');
+
+  try {
+    const response = await axios({
+      method: 'get',
+      url: url,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': 'https://toffeelive.com/',
+        'Origin': 'https://toffeelive.com'
+      },
+      responseType: 'stream'
+    });
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (response.headers['content-type']) {
+      res.setHeader('Content-Type', response.headers['content-type']);
+    }
+
+    response.data.pipe(res);
+  } catch (err) {
+    res.status(500).send('Media chunk pipeline transmission failed.');
+  }
+});
 // ==========================================
 
 // Basic Health Route
