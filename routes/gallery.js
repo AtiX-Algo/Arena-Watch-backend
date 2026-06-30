@@ -33,16 +33,17 @@ router.post('/', async (req, res) => {
   }
 });
 
-// PATCH toggle featured status
 router.put('/:id/feature', async (req, res) => {
   try {
-    const card = await Gallery.findById(req.params.id);
+    // 🛑 CHANGE THIS: Gallery.findById -> GalleryCard.findById
+    const card = await GalleryCard.findById(req.params.id); 
     if (!card) return res.status(404).json({ message: 'Card not found' });
 
     card.isFeatured = !card.isFeatured;
     const updatedCard = await card.save();
     res.json(updatedCard);
   } catch (error) {
+    console.error(error); // Optional: adding this will let you see errors in Render logs
     res.status(500).json({ message: 'Server error' });
   }
 });
