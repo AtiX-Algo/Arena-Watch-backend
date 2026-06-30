@@ -71,29 +71,34 @@ app.use('/api/dreamxi', dreamxiRoutes);
 app.use('/api/predictions', predictionRoutes);
 
 // ==========================================
-// 📺 LIVE STREAM SECURE PROXY MATRIX
-// Bypasses CORS and firewalls by masking headers 
-// and rewriting stream links recursively on-the-fly.
+// 📺 LIVE STREAM SECURE PROXY MATRIX (PATCHED)
 // ==========================================
 
 // 1. HLS/DASH Playlists (.m3u8 / .mpd) Proxy
 app.get('/api/proxy/stream.m3u8', async (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.status(400).send('Missing url parameter');
+  // Extract the original URL with its query parameters preserved completely
+  const fullUrlString = req.url.substring(req.url.indexOf('?url=') + 5);
+  const decodedUrl = decodeURIComponent(fullUrlString);
+
+  if (!decodedUrl || decodedUrl === 'PENDING') {
+    return res.status(400).send('Invalid source payload node.');
+  }
 
   try {
-    const response = await axios.get(url, {
+    const response = await axios.get(decodedUrl, {
       headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': '*/*',
+        'Accept-Language': 'en-US,en;q=0.9',
         'Referer': 'https://toffeelive.com/',
         'Origin': 'https://toffeelive.com'
-      }
+      },
+      timeout: 7000 // Cut hanging operations early
     });
 
     const manifest = response.data;
     const host = `${req.protocol}://${req.get('host')}`;
 
-    // Step through the file line by line to inject our proxy matrix route
     const lines = manifest.split('\n');
     const updatedLines = lines.map(line => {
       const trimmed = line.trim();
@@ -101,13 +106,11 @@ app.get('/api/proxy/stream.m3u8', async (req, res) => {
 
       let absoluteUrl;
       try {
-        // Resolve path structures seamlessly (handles domain-relative and absolute paths)
-        absoluteUrl = new URL(trimmed, url).href;
+        absoluteUrl = new URL(trimmed, decodedUrl).href;
       } catch (e) {
         return line;
       }
 
-      // Route sub-manifests recursively back here, or route data chunks via binary pipeline
       if (absoluteUrl.includes('.m3u8') || absoluteUrl.includes('.mpd')) {
         return `${host}/api/proxy/stream.m3u8?url=${encodeURIComponent(absoluteUrl)}`;
       }
@@ -116,10 +119,45 @@ app.get('/api/proxy/stream.m3u8', async (req, res) => {
 
     res.setHeader('Content-Type', 'application/x-mpegURL');
     res.setHeader('Access-Control-Allow-Origin', '*');
-    res.send(updatedLines.join('\n'));
+    return res.send(updatedLines.join('\n'));
   } catch (err) {
-    console.error('🚨 Proxy Manifest Mapping Error:', err.message);
-    res.status(500).send('Stream manifest translation vectors corrupted.');
+    console.error('🚨 Proxy Manifest Fault:', err.message);
+    // Send back the actual status code thrown by Toffee CDN to trace geo-blocks (likely 403)
+    const statusCode = err.response ? err.response.status : 500;
+    return res.status(statusCode).send(`Upstream matrix returned status code: ${statusCode}`);
+  }
+});
+
+// 2. Binary Media Data Segments (.ts / chunks) Pipeline Proxy
+app.get('/api/proxy/chunk', async (req, res) => {
+  const fullUrlString = req.url.substring(req.url.indexOf('?url=') + 5);
+  const decodedUrl = decodeURIComponent(fullUrlString);
+
+  if (!decodedUrl) return res.status(400).send('Missing segment link asset.');
+
+  try {
+    const response = await axios({
+      method: 'get',
+      url: decodedUrl,
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Referer': 'https://toffeelive.com/',
+        'Origin': 'https://toffeelive.com',
+        'Accept': '*/*'
+      },
+      responseType: 'stream',
+      timeout: 10000
+    });
+
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (response.headers['content-type']) {
+      res.setHeader('Content-Type', response.headers['content-type']);
+    }
+
+    return response.data.pipe(res);
+  } catch (err) {
+    const statusCode = err.response ? err.response.status : 500;
+    return res.status(statusCode).send('Media chunk pipeline transmission failed.');
   }
 });
 
