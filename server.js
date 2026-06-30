@@ -25,16 +25,28 @@ const { startPolling, getCachedMatches } = require('./services/espnPoller');
 const app = express();
 const server = http.createServer(app);
 
-// Initialize Socket.io with CORS allowed for our Vite frontend
+// Define allowed origins for production and local development
+const allowedOrigins = [
+  "http://localhost:5173", 
+  "https://arena-watch.web.app"
+];
+
+// Initialize Socket.io with CORS allowed for our Vite frontend & Prod App
 const io = new Server(server, {
   cors: {
-    origin: "http://localhost:5173", // Your Vite dev server
-    methods: ["GET", "POST"]
+    origin: allowedOrigins,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"]
   }
 });
 
 // Middleware
-app.use(cors());
+// Apply CORS to Express routes with the same allowed origins
+app.use(cors({
+  origin: allowedOrigins,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  credentials: true
+}));
+
 app.use(express.json());
 
 // ==========================================
