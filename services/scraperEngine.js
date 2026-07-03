@@ -36,6 +36,7 @@ function getSiteConfig(url) {
   return DEFAULT_CONFIG;
 }
 
+// Launches a fully isolated browser session per scraper task
 async function createNewBrowser() {
   return await puppeteer.launch({
     headless: true, 
@@ -50,6 +51,7 @@ async function createNewBrowser() {
   });
 }
 
+// Safely evaluates code inside the page and catches/absorbs detached frame crashes
 async function safeEvaluate(page, fn, ...args) {
   for (let i = 0; i < 4; i++) {
     try {
@@ -64,7 +66,20 @@ async function safeEvaluate(page, fn, ...args) {
       }
     }
   }
-  return null; // Return null instead of crashing the process completely
+  return null;
+}
+
+async function aggressiveClickLoop(page, maxClicks = 3, delay = 2000) {
+  try {
+    const viewport = page.viewport();
+    if (!viewport) return;
+    const centerX = viewport.width / 2;
+    const centerY = viewport.height / 2;
+    for (let i = 0; i < maxClicks; i++) {
+      await page.mouse.click(centerX, centerY).catch(() => {});
+      await new Promise(r => setTimeout(r, delay));
+    }
+  } catch (e) {}
 }
 
 // -------------------------------------------------------------
@@ -79,6 +94,7 @@ async function executeSecureCapture(targetUrl, retries = 2) {
     let uniqueServerMap = new Map(); 
     let windowCapturedUrls = [];
 
+    // Closes runaway popups securely in the background
     browser.on('targetcreated', async (target) => {
       if (target.type() === 'page') {
         try {
@@ -98,24 +114,26 @@ async function executeSecureCapture(targetUrl, retries = 2) {
       
       page.on('request', (req) => {
         try {
+          if (req.isInterceptResolutionHandled && req.isInterceptResolutionHandled()) return;
           const url = req.url().toLowerCase();
+          const type = req.resourceType();
           
-          // 🎯 SAFE INTEGRITY FIX: Never block primary or iframe document paths
-          if (req.isNavigationRequest() || url === targetUrl.toLowerCase()) {
-            return req.continue();
+          // 🔥 Prevents the interceptor from blocking the main website structure
+          if (type === 'document' || req.isNavigationRequest() || url === targetUrl.toLowerCase()) {
+            return req.continue().catch(() => {});
           }
           
           if (config.adBlockTerms.some(term => url.includes(term))) {
-            return req.abort();
+            return req.abort().catch(() => {});
           }
           
           const isTarget = config.targetExtensions.some(ext => url.includes(ext));
           if (isTarget && !url.includes('/ad') && !url.includes('blank') && !url.includes('pre-roll')) {
             windowCapturedUrls.push(req.url());
           }
-          return req.continue();
+          return req.continue().catch(() => {});
         } catch (_) {
-          try { req.continue(); } catch (__) {}
+          try { req.continue().catch(() => {}); } catch (__) {}
         }
       });
 
@@ -148,7 +166,10 @@ async function executeSecureCapture(targetUrl, retries = 2) {
             }
           }, label);
 
-          await new Promise(r => setTimeout(r, 4500)); 
+          // Wait for stream to buffer, run click loop in case play button needs pressing
+          await new Promise(r => setTimeout(r, 2000));
+          await aggressiveClickLoop(page, 1, 1000);
+          await new Promise(r => setTimeout(r, 3000)); 
 
           if (windowCapturedUrls.length > 0) {
             const targetManifestUrl = [...new Set(windowCapturedUrls)][0];
@@ -160,7 +181,7 @@ async function executeSecureCapture(targetUrl, retries = 2) {
         }
       } 
 
-      // Fallback: Code-rip raw manifests straight out of document markup if interceptor was blind
+      // Fallback: Rip hardcoded manifests straight out of the HTML document
       if (uniqueServerMap.size === 0) {
         const rawLinks = await safeEvaluate(page, () => {
           const matches = document.documentElement.innerHTML.match(/(https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/gi);
@@ -169,6 +190,15 @@ async function executeSecureCapture(targetUrl, retries = 2) {
 
         if (rawLinks && rawLinks.length > 0) {
           rawLinks.forEach((src, idx) => uniqueServerMap.set(src, `Source Extracted Relay ${idx + 1}`));
+        } else {
+          // Double Fallback: Grab the primary iFrame
+          const iframeSrc = await safeEvaluate(page, () => {
+            const iframes = Array.from(document.querySelectorAll('iframe'));
+            return iframes.length > 0 ? iframes[0].src : null;
+          });
+          if (iframeSrc && iframeSrc !== 'about:blank') {
+            uniqueServerMap.set(iframeSrc, "Embedded Gateway Frame");
+          }
         }
       }
 
@@ -209,9 +239,23 @@ async function discoverKickBDMatches(baseUrl = 'https://kickbd.org') {
     
     page.on('request', (req) => {
       try {
-        if (['image', 'stylesheet', 'font'].includes(req.resourceType())) req.abort();
-        else req.continue();
-      } catch (_) { try { req.continue(); } catch (__) {} }
+        if (req.isInterceptResolutionHandled && req.isInterceptResolutionHandled()) return;
+        const type = req.resourceType();
+        
+        // Never abort the primary document, let the page load successfully
+        if (type === 'document' || req.isNavigationRequest()) {
+           return req.continue().catch(() => {});
+        }
+
+        // Abort non-essential heavy files for speed
+        if (['image', 'stylesheet', 'font', 'media'].includes(type)) {
+          return req.abort().catch(() => {});
+        } 
+        
+        req.continue().catch(() => {});
+      } catch (_) { 
+        try { req.continue().catch(() => {}); } catch (__) {} 
+      }
     });
 
     for (const url of targetUrls) {
@@ -219,6 +263,10 @@ async function discoverKickBDMatches(baseUrl = 'https://kickbd.org') {
         console.log(`[Discovery] Scanning target vector: ${url}`);
         await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
         await new Promise(r => setTimeout(r, 4000));
+        
+        // Fire ghost click to detonate ads
+        await page.mouse.click(640, 360).catch(() => {});
+        await new Promise(r => setTimeout(r, 2000));
 
         const extracted = await safeEvaluate(page, () => {
           const anchors = Array.from(document.querySelectorAll('a[href*="/matches/"]'));
@@ -257,7 +305,12 @@ async function discoverKickBDMatches(baseUrl = 'https://kickbd.org') {
 // ARMORED TARGETED BDIPTV CAPTURE
 // -------------------------------------------------------------
 async function scrapeBDIPTVChannel(channelText = 'LIVE 1') {
+  // Uses the master capture engine directly for maximum stability
   return await executeSecureCapture('http://tv.bdiptv.net/');
 }
 
-module.exports = { executeSecureCapture, discoverKickBDMatches, scrapeBDIPTVChannel };
+module.exports = { 
+  executeSecureCapture, 
+  discoverKickBDMatches, 
+  scrapeBDIPTVChannel 
+};

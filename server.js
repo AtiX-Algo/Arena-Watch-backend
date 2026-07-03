@@ -5,7 +5,7 @@ const { Server } = require('socket.io');
 const cors = require('cors');
 const axios = require('axios');
 require('dotenv').config();
-require('./scheduler/refreshTokens');
+require('./scheduler/refreshTokens'); 
 
 // ==========================================
 // 🛡️ GLOBAL CRASH PREVENTION
@@ -64,10 +64,8 @@ app.use('/api/dreamxi', dreamxiRoutes);
 app.use('/api/predictions', predictionRoutes);
 
 // ==========================================
-// 📺 LIVE STREAM SECURE PROXY MATRIX (DYNAMIC HEADER FIX)
+// 📺 LIVE STREAM SECURE PROXY MATRIX
 // ==========================================
-
-// Helper to generate spoofed headers dynamically based on target
 const getSpoofedHeaders = (targetUrl) => {
   try {
     const parsedUrl = new URL(targetUrl);
@@ -124,16 +122,10 @@ app.get('/api/proxy/stream.m3u8', async (req, res) => {
     return res.send(updatedLines.join('\n'));
 
   } catch (err) {
-    console.warn(`🚨 Proxy Manifest Fault [403/500 Bypass Engaged] on ${decodedUrl}`);
-    
-    // BACKUP FALLBACK: If Render is geo-blocked by the streaming provider,
-    // gracefully redirect the client to load the stream directly instead of crashing.
-    try {
-      return res.redirect(302, decodedUrl);
-    } catch (_) {
-      if (!res.headersSent) {
-        return res.status(502).send('Upstream matrix relay dropped connection paths.');
-      }
+    console.warn(`🚨 Proxy Manifest Fault on ${decodedUrl}:`, err.message);
+    // Returns 502 Bad Gateway to securely trigger frontend HLS failovers without causing CORS crashes
+    if (!res.headersSent) {
+      return res.status(502).send('Upstream matrix relay blocked Render IP (403) or dropped connection.');
     }
   }
 });
@@ -176,12 +168,12 @@ app.get('/api/health', (req, res) => {
 
 // MongoDB Atlas Connection
 mongoose.connect(process.env.MONGODB_URI, {
-  family: 4, 
+  family: 4, // Fixes DNS SRV errors by forcing IPv4
   serverSelectionTimeoutMS: 15000 
 })
   .then(() => {
     console.log('✅ MongoDB Atlas Connected Successfully');
-    startPolling(io); 
+    if (typeof startPolling === 'function') startPolling(io); 
   })
   .catch((err) => console.error('❌ MongoDB Connection Error:', err.message));
 
@@ -189,13 +181,14 @@ mongoose.connect(process.env.MONGODB_URI, {
 io.on('connection', (socket) => {
   console.log(`🔌 Dashboard connected: ${socket.id}`);
   
-  const currentMatches = getCachedMatches();
-  if (currentMatches.length > 0) {
-    socket.emit('matchUpdates', currentMatches);
+  if (typeof getCachedMatches === 'function') {
+    const currentMatches = getCachedMatches();
+    if (currentMatches && currentMatches.length > 0) {
+      socket.emit('matchUpdates', currentMatches);
+    }
   }
 });
 
-// Start Server
 const PORT = process.env.PORT || 5000;
 server.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
