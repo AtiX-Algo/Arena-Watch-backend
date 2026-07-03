@@ -3,13 +3,12 @@ const http = require('http');
 const mongoose = require('mongoose');
 const { Server } = require('socket.io');
 const cors = require('cors');
-const axios = require('axios'); // 🔥 Added for routing proxy requests
+const axios = require('axios');
 require('dotenv').config();
 require('./scheduler/refreshTokens');
 
 // ==========================================
 // 🛡️ GLOBAL CRASH PREVENTION
-// Prevents Puppeteer/Stealth plugin errors from killing the Node process
 // ==========================================
 process.on('uncaughtException', (err) => {
   console.error('🚨 [Fatal] Uncaught Exception:', err.message);
@@ -20,19 +19,16 @@ process.on('unhandledRejection', (reason, promise) => {
 });
 // ==========================================
 
-// IMPORT YOUR NEW POLLER
 const { startPolling, getCachedMatches } = require('./services/espnPoller');
 
 const app = express();
 const server = http.createServer(app);
 
-// Define allowed origins for production and local development
 const allowedOrigins = [
   "http://localhost:5173", 
   "https://arena-watch.web.app"
 ];
 
-// Initialize Socket.io with CORS allowed for our Vite frontend & Prod App
 const io = new Server(server, {
   cors: {
     origin: allowedOrigins,
@@ -40,8 +36,6 @@ const io = new Server(server, {
   }
 });
 
-// Middleware
-// Apply CORS to Express routes with the same allowed origins
 app.use(cors({
   origin: allowedOrigins,
   methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
@@ -61,7 +55,6 @@ const fanCardRoutes = require('./routes/fancards');
 const dreamxiRoutes = require('./routes/dreamxi');
 const predictionRoutes = require('./routes/predictions');
 
-// Mount Endpoints
 app.use('/api/matches', matchesRouter);
 app.use('/api/channels', channelRoutes);
 app.use('/api/gallery', galleryRoutes);
@@ -71,12 +64,27 @@ app.use('/api/dreamxi', dreamxiRoutes);
 app.use('/api/predictions', predictionRoutes);
 
 // ==========================================
-// 📺 LIVE STREAM SECURE PROXY MATRIX (PATCHED)
+// 📺 LIVE STREAM SECURE PROXY MATRIX (DYNAMIC HEADER FIX)
 // ==========================================
+
+// Helper to generate spoofed headers dynamically based on target
+const getSpoofedHeaders = (targetUrl) => {
+  try {
+    const parsedUrl = new URL(targetUrl);
+    return {
+      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+      'Accept': '*/*',
+      'Accept-Language': 'en-US,en;q=0.9',
+      'Origin': parsedUrl.origin,
+      'Referer': parsedUrl.origin + '/'
+    };
+  } catch (e) {
+    return { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
+  }
+};
 
 // 1. HLS/DASH Playlists (.m3u8 / .mpd) Proxy
 app.get('/api/proxy/stream.m3u8', async (req, res) => {
-  // Extract the original URL with its query parameters preserved completely
   const fullUrlString = req.url.substring(req.url.indexOf('?url=') + 5);
   const decodedUrl = decodeURIComponent(fullUrlString);
 
@@ -86,14 +94,8 @@ app.get('/api/proxy/stream.m3u8', async (req, res) => {
 
   try {
     const response = await axios.get(decodedUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept': '*/*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://toffeelive.com/',
-        'Origin': 'https://toffeelive.com'
-      },
-      timeout: 7000 // Cut hanging operations early
+      headers: getSpoofedHeaders(decodedUrl),
+      timeout: 10000 
     });
 
     const manifest = response.data;
@@ -120,11 +122,19 @@ app.get('/api/proxy/stream.m3u8', async (req, res) => {
     res.setHeader('Content-Type', 'application/x-mpegURL');
     res.setHeader('Access-Control-Allow-Origin', '*');
     return res.send(updatedLines.join('\n'));
+
   } catch (err) {
-    console.error('🚨 Proxy Manifest Fault:', err.message);
-    // Send back the actual status code thrown by Toffee CDN to trace geo-blocks (likely 403)
-    const statusCode = err.response ? err.response.status : 500;
-    return res.status(statusCode).send(`Upstream matrix returned status code: ${statusCode}`);
+    console.warn(`🚨 Proxy Manifest Fault [403/500 Bypass Engaged] on ${decodedUrl}`);
+    
+    // BACKUP FALLBACK: If Render is geo-blocked by the streaming provider,
+    // gracefully redirect the client to load the stream directly instead of crashing.
+    try {
+      return res.redirect(302, decodedUrl);
+    } catch (_) {
+      if (!res.headersSent) {
+        return res.status(502).send('Upstream matrix relay dropped connection paths.');
+      }
+    }
   }
 });
 
@@ -139,12 +149,7 @@ app.get('/api/proxy/chunk', async (req, res) => {
     const response = await axios({
       method: 'get',
       url: decodedUrl,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Referer': 'https://toffeelive.com/',
-        'Origin': 'https://toffeelive.com',
-        'Accept': '*/*'
-      },
+      headers: getSpoofedHeaders(decodedUrl),
       responseType: 'stream',
       timeout: 10000
     });
@@ -157,35 +162,9 @@ app.get('/api/proxy/chunk', async (req, res) => {
     return response.data.pipe(res);
   } catch (err) {
     const statusCode = err.response ? err.response.status : 500;
-    return res.status(statusCode).send('Media chunk pipeline transmission failed.');
-  }
-});
-
-// 2. Binary Media Data Segments (.ts / chunks) Pipeline Proxy
-app.get('/api/proxy/chunk', async (req, res) => {
-  const { url } = req.query;
-  if (!url) return res.status(400).send('Missing url parameter');
-
-  try {
-    const response = await axios({
-      method: 'get',
-      url: url,
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Referer': 'https://toffeelive.com/',
-        'Origin': 'https://toffeelive.com'
-      },
-      responseType: 'stream'
-    });
-
-    res.setHeader('Access-Control-Allow-Origin', '*');
-    if (response.headers['content-type']) {
-      res.setHeader('Content-Type', response.headers['content-type']);
+    if (!res.headersSent) {
+      return res.status(statusCode).send('Media chunk pipeline transmission failed.');
     }
-
-    response.data.pipe(res);
-  } catch (err) {
-    res.status(500).send('Media chunk pipeline transmission failed.');
   }
 });
 // ==========================================
@@ -195,14 +174,13 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'API is running optimally.' });
 });
 
-// MongoDB Atlas Connection (WITH DNS/IPV4 FIX)
+// MongoDB Atlas Connection
 mongoose.connect(process.env.MONGODB_URI, {
-  family: 4, // 🔥 THIS FIXES THE DNS SRV ERROR BY FORCING IPv4
+  family: 4, 
   serverSelectionTimeoutMS: 15000 
 })
   .then(() => {
     console.log('✅ MongoDB Atlas Connected Successfully');
-    // START THE POLLER ONCE DATABASE CONNECTS
     startPolling(io); 
   })
   .catch((err) => console.error('❌ MongoDB Connection Error:', err.message));
@@ -211,7 +189,6 @@ mongoose.connect(process.env.MONGODB_URI, {
 io.on('connection', (socket) => {
   console.log(`🔌 Dashboard connected: ${socket.id}`);
   
-  // INSTANT PUSH: Give the user the latest scores the millisecond they connect
   const currentMatches = getCachedMatches();
   if (currentMatches.length > 0) {
     socket.emit('matchUpdates', currentMatches);
