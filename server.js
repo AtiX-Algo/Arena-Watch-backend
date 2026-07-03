@@ -1,5 +1,6 @@
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const mongoose = require('mongoose');
 const { Server } = require('socket.io');
 const cors = require('cors');
@@ -44,6 +45,12 @@ app.use(cors({
 
 app.use(express.json());
 
+// Create an Axios instance that ignores SSL errors from sketchy upstream CDNs
+const axiosInstance = axios.create({
+  httpsAgent: new https.Agent({ rejectUnauthorized: false }),
+  timeout: 15000
+});
+
 // ==========================================
 // 🛣️ ROUTES SETUP
 // ==========================================
@@ -64,21 +71,38 @@ app.use('/api/dreamxi', dreamxiRoutes);
 app.use('/api/predictions', predictionRoutes);
 
 // ==========================================
-// 📺 LIVE STREAM SECURE PROXY MATRIX
+// 📺 LIVE STREAM SECURE PROXY MATRIX (GHOST EDITION)
 // ==========================================
 const getSpoofedHeaders = (targetUrl) => {
-  try {
-    const parsedUrl = new URL(targetUrl);
-    return {
-      'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-      'Accept': '*/*',
-      'Accept-Language': 'en-US,en;q=0.9',
-      'Origin': parsedUrl.origin,
-      'Referer': parsedUrl.origin + '/'
-    };
-  } catch (e) {
-    return { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)' };
+  const urlLower = targetUrl.toLowerCase();
+  let origin = 'https://kickbd.org';
+  let referer = 'https://kickbd.org/';
+
+  // Intelligently spoof the origin based on the target stream
+  if (urlLower.includes('toffee')) {
+    origin = 'https://toffeelive.com';
+    referer = 'https://toffeelive.com/';
+  } else if (urlLower.includes('bdiptv')) {
+    origin = 'http://tv.bdiptv.net';
+    referer = 'http://tv.bdiptv.net/';
+  } else if (urlLower.includes('streamed')) {
+    origin = 'https://streamed.pk';
+    referer = 'https://streamed.pk/';
   }
+
+  // Randomize a Dhaka/BD residential IP block to bypass Geo-Fencing
+  const bdIp = `103.${Math.floor(Math.random() * 100 + 100)}.${Math.floor(Math.random() * 255)}.${Math.floor(Math.random() * 255)}`;
+
+  return {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+    'Accept': '*/*',
+    'Accept-Language': 'en-US,en;q=0.9,bn-BD;q=0.8,bn;q=0.7',
+    'Origin': origin,
+    'Referer': referer,
+    'X-Forwarded-For': bdIp,
+    'Client-IP': bdIp,
+    'Connection': 'keep-alive'
+  };
 };
 
 // 1. HLS/DASH Playlists (.m3u8 / .mpd) Proxy
@@ -91,9 +115,8 @@ app.get('/api/proxy/stream.m3u8', async (req, res) => {
   }
 
   try {
-    const response = await axios.get(decodedUrl, {
-      headers: getSpoofedHeaders(decodedUrl),
-      timeout: 10000 
+    const response = await axiosInstance.get(decodedUrl, {
+      headers: getSpoofedHeaders(decodedUrl)
     });
 
     const manifest = response.data;
@@ -118,12 +141,11 @@ app.get('/api/proxy/stream.m3u8', async (req, res) => {
     });
 
     res.setHeader('Content-Type', 'application/x-mpegURL');
-    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Origin', '*'); // Defeats Frontend CORS
     return res.send(updatedLines.join('\n'));
 
   } catch (err) {
-    console.warn(`🚨 Proxy Manifest Fault on ${decodedUrl}:`, err.message);
-    // Returns 502 Bad Gateway to securely trigger frontend HLS failovers without causing CORS crashes
+    console.warn(`🚨 Proxy Manifest Blocked on ${decodedUrl}:`, err.message);
     if (!res.headersSent) {
       return res.status(502).send('Upstream matrix relay blocked Render IP (403) or dropped connection.');
     }
@@ -138,12 +160,11 @@ app.get('/api/proxy/chunk', async (req, res) => {
   if (!decodedUrl) return res.status(400).send('Missing segment link asset.');
 
   try {
-    const response = await axios({
+    const response = await axiosInstance({
       method: 'get',
       url: decodedUrl,
       headers: getSpoofedHeaders(decodedUrl),
-      responseType: 'stream',
-      timeout: 10000
+      responseType: 'stream'
     });
 
     res.setHeader('Access-Control-Allow-Origin', '*');
@@ -161,14 +182,10 @@ app.get('/api/proxy/chunk', async (req, res) => {
 });
 // ==========================================
 
-// Basic Health Route
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'API is running optimally.' });
-});
+app.get('/api/health', (req, res) => res.json({ status: 'API is running optimally.' }));
 
-// MongoDB Atlas Connection
 mongoose.connect(process.env.MONGODB_URI, {
-  family: 4, // Fixes DNS SRV errors by forcing IPv4
+  family: 4, 
   serverSelectionTimeoutMS: 15000 
 })
   .then(() => {
@@ -177,10 +194,8 @@ mongoose.connect(process.env.MONGODB_URI, {
   })
   .catch((err) => console.error('❌ MongoDB Connection Error:', err.message));
 
-// Socket.io Logic
 io.on('connection', (socket) => {
   console.log(`🔌 Dashboard connected: ${socket.id}`);
-  
   if (typeof getCachedMatches === 'function') {
     const currentMatches = getCachedMatches();
     if (currentMatches && currentMatches.length > 0) {
@@ -190,6 +205,4 @@ io.on('connection', (socket) => {
 });
 
 const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-});
+server.listen(PORT, () => console.log(`🚀 Server running on port ${PORT}`));
